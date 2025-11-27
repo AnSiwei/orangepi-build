@@ -1,0 +1,117 @@
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+
+name: Build OrangePi 4 LTS image
+
+jobs:
+  build-orangepi4lts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      SRC: ${{ github.workspace }}
+      BUILD_CONFIG_NAME: orangepi-4-lts
+      OUTPUT_DIR: output
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up QEMU emulation
+        uses: docker/setup-qemu-action@v2
+
+      - name: Prepare build/cache directories
+        run: |
+          mkdir -p "${{ runner.temp }}/ccache"
+          mkdir -p userpatches
+        shell: bash
+
+      - name: Cache downloads and ccache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ runner.temp }}/ccache
+            ~/.cache/apt
+            ~/.buildroot_downloads
+          key: ${{ runner.os }}-orangepi-build-${{ matrix.board || 'orangepi4lts' }}-${{ hashFiles('**/build.sh','**/scripts/**/*.sh') }}
+          restore-keys: |
+            ${{ runner.os }}-orangepi-build-
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            qemu-user-static binfmt-support debootstrap kpartx dosfstools \
+            e2fsprogs squashfs-tools pv parted bc ccache rsync unzip xz-utils \
+            build-essential git python3 python3-pip wget curl gawk
+          # ensure ccache dir exists
+          mkdir -p "${{ runner.temp }}/ccache"
+        shell: bash
+
+      - name: Ensure qemu-aarch64-static is available
+        run: |
+          if [ -f /usr/bin/qemu-aarch64-static ]; then
+            echo "qemu-aarch64-static present"
+          elif [ -f /usr/bin/qemu-aarch64 ]; then
+            sudo copy=/usr/bin/qemu-aarch64; sudo cp $copy /usr/bin/qemu-aarch64-static || true
+          fi
+        continue-on-error: true
+        shell: bash
+
+      - name: Prepare config for OrangePi 4 LTS
+        run: |
+          set -xe
+          # If template exists, copy it; otherwise create a minimal config
+          if [ -f external/config/templates/config-example.conf ]; then
+            cp external/config/templates/config-example.conf userpatches/config-${{ env.BUILD_CONFIG_NAME }}.conf
+          else
+            cat > userpatches/config-${{ env.BUILD_CONFIG_NAME }}.conf <<'EOF'
+# minimal config created by CI
+BOARD=orangepi-4-lts
+# add more variables here if needed
+EOF
+          fi
+          # Append/override BOARD (safe to append)
+          if ! grep -q "^BOARD=" userpatches/config-${{ env.BUILD_CONFIG_NAME }}.conf; then
+            echo "BOARD=orangepi-4-lts" >> userpatches/config-${{ env.BUILD_CONFIG_NAME }}.conf
+          else
+            # replace existing BOARD line
+            sed -i 's/^BOARD=.*/BOARD=orangepi-4-lts/' userpatches/config-${{ env.BUILD_CONFIG_NAME }}.conf
+          fi
+          ls -l userpatches
+          echo "---- config begins ----"
+          sed -n '1,120p' userpatches/config-${{ env.BUILD_CONFIG_NAME }}.conf || true
+          echo "---- config ends ----"
+        shell: bash
+
+      - name: Make build script executable
+        run: chmod +x ./build.sh
+        shell: bash
+
+      - name: Run build.sh for orangepi-4-lts
+        env:
+          DEBIAN_FRONTEND: noninteractive
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+        run: |
+          set -xeo pipefail
+          # build.sh expects first argument to pick config userpatches/config-<name>.conf
+          sudo bash ./build.sh ${{ env.BUILD_CONFIG_NAME }}
+        shell: bash
+
+      - name: List output
+        run: |
+          echo "Build output (./output):"
+          sudo ls -alh ./output || true
+        shell: bash
+
+      - name: Upload artifact: output
+        uses: actions/upload-artifact@v4
+        with:
+          name: orangepi4lts-output-${{ github.run_id }}
+          path: output
